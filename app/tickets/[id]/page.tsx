@@ -5,7 +5,37 @@ import { useParams } from "next/navigation";
 
 import { apiFetch, ApiError } from "@/lib/api";
 import { getSession } from "@/lib/session";
+import {
+  canAssignTickets,
+  canChangeStatus,
+  canManageTags,
+  canWriteInternalComments,
+  canCreateTags,
+  canDeleteTickets,
+} from "@/lib/permissions";
+import { getLegalTransitions, type TicketStatus } from "@/lib/transitions";
 import type { Ticket } from "@/lib/tickets";
+
+const ASSIGNEES = [
+  {
+    id: 1,
+    fullName: "Support Desk Admin",
+    email: "admin@supportdesk.local",
+    role: "admin",
+  },
+  {
+    id: 2,
+    fullName: "Support Agent One",
+    email: "agent1@supportdesk.local",
+    role: "agent",
+  },
+  {
+    id: 3,
+    fullName: "Support Agent Two",
+    email: "agent2@supportdesk.local",
+    role: "agent",
+  },
+] as const;
 
 interface TicketComment {
   id: number;
@@ -63,12 +93,34 @@ export default function TicketDetailPage() {
 
   const [commentBody, setCommentBody] = useState("");
   const [isInternal, setIsInternal] = useState(false);
+
+  const [selectedStatus, setSelectedStatus] = useState<TicketStatus | "">("");
+  const [statusError, setStatusError] = useState("");
+  const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+
+  const [selectedAssignee, setSelectedAssignee] = useState("");
+  const [assigneeError, setAssigneeError] = useState("");
+  const [isAssigning, setIsAssigning] = useState(false);
+
   const [commentError, setCommentError] = useState("");
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
 
   const session = getSession();
-  const canCreateInternalComment =
-    session?.user.role === "agent" || session?.user.role === "admin";
+  const role = session?.user.role;
+
+  const canAssign = role ? canAssignTickets(role) : false;
+  const canChange = role ? canChangeStatus(role) : false;
+  const canManage = role ? canManageTags(role) : false;
+  const canCreateTag = role ? canCreateTags(role) : false;
+  const canDelete = role ? canDeleteTickets(role) : false;
+
+  const canCreateInternalComment = role
+    ? canWriteInternalComments(role)
+    : false;
+
+  const availableTransitions = ticket
+    ? getLegalTransitions(ticket.status as TicketStatus)
+    : [];
 
   useEffect(() => {
     async function loadTicket() {
@@ -77,16 +129,39 @@ export default function TicketDetailPage() {
       setNotFound(false);
 
       try {
-        const [ticketResponse, commentsResponse, eventsResponse] =
-          await Promise.all([
-            apiFetch<Ticket>(`/tickets/${params.id}`),
-            apiFetch<TicketComment[]>(`/tickets/${params.id}/comments`),
-            apiFetch<TicketEvent[]>(`/tickets/${params.id}/events`),
-          ]);
+        const ticketResponse = await apiFetch<Ticket>(`/tickets/${params.id}`);
 
         setTicket(ticketResponse);
-        setComments(commentsResponse);
-        setEvents(eventsResponse);
+        setSelectedStatus("");
+        setSelectedAssignee(
+          ticketResponse.assignee ? String(ticketResponse.assignee.id) : "",
+        );
+
+        try {
+          const commentsResponse = await apiFetch<TicketComment[]>(
+            `/tickets/${params.id}/comments`,
+          );
+          setComments(commentsResponse);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 404) {
+            setComments([]);
+          } else {
+            throw error;
+          }
+        }
+
+        try {
+          const eventsResponse = await apiFetch<TicketEvent[]>(
+            `/tickets/${params.id}/events`,
+          );
+          setEvents(eventsResponse);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 404) {
+            setEvents([]);
+          } else {
+            throw error;
+          }
+        }
       } catch (error) {
         if (error instanceof ApiError) {
           if (error.status === 404) {
@@ -151,6 +226,87 @@ export default function TicketDetailPage() {
       }
     } finally {
       setIsSubmittingComment(false);
+    }
+  }
+
+  async function handleStatusChange() {
+    if (!ticket || !selectedStatus) {
+      return;
+    }
+
+    setStatusError("");
+    setIsUpdatingStatus(true);
+
+    try {
+      const response = await apiFetch<Ticket>(`/tickets/${params.id}/status`, {
+        method: "POST",
+        body: JSON.stringify({
+          status: selectedStatus,
+          ...(ticket.status === "closed" && selectedStatus === "in_progress"
+            ? { note: "Ticket reopened." }
+            : {}),
+        }),
+      });
+
+      setTicket(response);
+      setSelectedStatus("");
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.status === 409) {
+          setStatusError("This status transition is not allowed.");
+        } else if (error.status === 403) {
+          setStatusError("You do not have permission to change the status.");
+        } else if (error.status === 404) {
+          setStatusError("Ticket not found.");
+        } else if (error.status === 400) {
+          setStatusError(error.message);
+        } else {
+          setStatusError(error.message);
+        }
+      } else {
+        setStatusError("Unable to update ticket status.");
+      }
+    } finally {
+      setIsUpdatingStatus(false);
+    }
+  }
+
+  async function handleAssignTicket() {
+    if (!selectedAssignee) {
+      return;
+    }
+
+    setAssigneeError("");
+    setIsAssigning(true);
+
+    try {
+      const response = await apiFetch<Ticket>(`/tickets/${params.id}/assign`, {
+        method: "POST",
+        body: JSON.stringify({
+          assigneeId: Number(selectedAssignee),
+        }),
+      });
+
+      setTicket(response);
+      setSelectedAssignee("");
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.status === 400) {
+          setAssigneeError(error.message);
+        } else if (error.status === 403) {
+          setAssigneeError("You do not have permission to assign this ticket.");
+        } else if (error.status === 404) {
+          setAssigneeError("Ticket or assignee not found.");
+        } else if (error.status === 422) {
+          setAssigneeError("The selected user cannot be assigned to tickets.");
+        } else {
+          setAssigneeError(error.message);
+        }
+      } else {
+        setAssigneeError("Unable to assign ticket.");
+      }
+    } finally {
+      setIsAssigning(false);
     }
   }
 
@@ -226,6 +382,53 @@ export default function TicketDetailPage() {
           <p className="whitespace-pre-wrap text-gray-700">{ticket.body}</p>
         </section>
 
+        {canChange && (
+          <section className="rounded-lg border p-6">
+            <h2 className="mb-4 font-semibold">Status</h2>
+
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label
+                  htmlFor="ticket-status"
+                  className="mb-1 block text-sm text-gray-500"
+                >
+                  Change status
+                </label>
+
+                <select
+                  id="ticket-status"
+                  value={selectedStatus}
+                  onChange={(event) =>
+                    setSelectedStatus(event.target.value as TicketStatus | "")
+                  }
+                  className="rounded border px-3 py-2"
+                >
+                  <option value="">Select status</option>
+
+                  {availableTransitions.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleStatusChange}
+                disabled={!selectedStatus || isUpdatingStatus}
+                className="rounded bg-black px-4 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isUpdatingStatus ? "Updating..." : "Update Status"}
+              </button>
+            </div>
+
+            {statusError && (
+              <p className="mt-3 text-sm text-red-600">{statusError}</p>
+            )}
+          </section>
+        )}
+
         <section className="rounded-lg border p-6">
           <h2 className="mb-4 font-semibold">Ticket Information</h2>
 
@@ -244,6 +447,50 @@ export default function TicketDetailPage() {
               <p className="font-medium">
                 {ticket.assignee?.fullName ?? "Unassigned"}
               </p>
+
+              {canAssign && (
+                <div className="mt-4">
+                  <label
+                    htmlFor="assignee"
+                    className="mb-2 block text-sm font-medium"
+                  >
+                    Assign Ticket
+                  </label>
+
+                  <div className="flex gap-2">
+                    <select
+                      id="assignee"
+                      value={selectedAssignee}
+                      onChange={(event) => {
+                        setSelectedAssignee(event.target.value);
+                        setAssigneeError("");
+                      }}
+                      className="rounded border px-3 py-2"
+                    >
+                      <option value="">Select assignee</option>
+
+                      {ASSIGNEES.map((assignee) => (
+                        <option key={assignee.id} value={assignee.id}>
+                          {assignee.fullName} ({assignee.role})
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={handleAssignTicket}
+                      disabled={!selectedAssignee || isAssigning}
+                      className="rounded bg-black px-4 py-2 text-white disabled:opacity-50"
+                    >
+                      {isAssigning ? "Assigning..." : "Assign"}
+                    </button>
+                  </div>
+
+                  {assigneeError && (
+                    <p className="mt-2 text-sm text-red-600">{assigneeError}</p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
