@@ -7,7 +7,7 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "../auth-provider";
 
 interface LoginResponse {
-  token: string;
+  accessToken: string;
   user: {
     id: number;
     fullName: string;
@@ -48,7 +48,10 @@ export default function LoginPage() {
         }),
       });
 
-      signIn(response);
+      signIn({
+        token: response.accessToken,
+        user: response.user,
+      });
       router.replace("/tickets");
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
